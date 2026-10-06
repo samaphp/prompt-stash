@@ -1,0 +1,10 @@
+{
+  "name": "prompt-stash",
+  "version": "0.1.0",
+  "description": "Stash a thought from the prompt box with ;; and bring it back in a later turn",
+  "author": {
+    "name": "samaphp",
+    "url": "https://github.com/samaphp"
+  },
+  "types": "./types/index.d.ts"
+}
