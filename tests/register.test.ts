@@ -53,9 +53,12 @@ const held = (id: string, text: string, more: Partial<Thought> = {}): Thought =>
   ...more,
 })
 
-// The test engine raises `prompt.edit` and `ui.focus` at run time; this
-// build's typings leave the calls off its nouns, so each is reached through
-// one cast.
+// The test engine raises `prompt.edit`, `ui.focus` and `session.append` at
+// run time, and `mock.session` records rows from the kit shipped with Claude
+// Code 2.1.295; the typings a session lays may predate them, so each is
+// reached through one cast.
+type RecordedRows = { appended: () => readonly { message: { content: readonly { text?: string }[] } }[] }
+const recordRows = (on: On) => (mock as unknown as { session: (on: On) => RecordedRows }).session(on)
 const edit = ($: Engine, e: Omit<PromptEditInput, 'origin'>) =>
   ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<PromptEditResult> }).edit({ ...e, origin: COMPOSER })
 
@@ -189,6 +192,36 @@ for (const surface of SURFACES) {
     return $.ui.mount({ ...PANE, surface })
   }
 
+  test(`${surface}: the engine's dropped-prompt row is reworded to the mod's own words`, async ($, on) => {
+    world(on)
+    const session = recordRows(on)
+    await start($)
+    const rows = [
+      'Prompt dropped by a hook: stashed · ;; + enter opens the stash',
+      'Prompt dropped by a hook: stash open · esc closes it',
+      'Prompt dropped by a hook: the stash could not open here (no room)',
+      'Dropped (some other wording): stash open · esc closes it',
+      "Prompt dropped by a hook: some other hook's reason",
+    ]
+
+    for (const [index, text] of rows.entries()) {
+      await ($.session as unknown as { append: (e: unknown) => Promise<unknown> }).append({
+        message: { type: 'system', content: [{ type: 'text', text }] },
+        door: 'notice',
+        origin: { kind: 'composer' },
+        uuid: `row-${index}`,
+      })
+    }
+
+    expect(session.appended().map(row => row.message.content[0]?.text)).toEqual([
+      'stashed · ;; + enter opens the stash',
+      'stash open · esc closes it',
+      'the stash could not open here (no room)',
+      'stash open · esc closes it',
+      "Prompt dropped by a hook: some other hook's reason",
+    ])
+  })
+
   test(`${surface}: an empty shelf draws nothing`, async ($, on) => {
     world(on)
     const band = await start($)
@@ -198,13 +231,16 @@ for (const surface of SURFACES) {
   })
 
   test(`${surface}: a prompt that starts with the marker is shelved and never enters the conversation`, async ($, on) => {
-    const { entered, panes, saved } = world(on)
+    const { box, clock, entered, panes, saved } = world(on)
     const band = await start($)
+    box.text = ';;  ask about the cache TTL '
 
     const answer = await submit($, ';;  ask about the cache TTL ')
+    await clock.settle()
     await band.redraw()
 
-    expect(answer.drop).toContain('stashed')
+    expect(answer.drop).toBe('stashed · ;; + enter opens the stash')
+    expect(box.text).toBe('')
     expect(entered).toHaveLength(0)
     expect(panes.opened).toHaveLength(0)
     expect(saved()).toMatchObject([
@@ -353,15 +389,19 @@ for (const surface of SURFACES) {
   })
 
   test(`${surface}: the marker alone opens the list with the keyboard and enters nothing`, async ($, on) => {
-    const { entered, panes, saved } = world(on, THREE)
+    const { box, clock, entered, panes, saved } = world(on, THREE)
     await start($)
+    box.text = ' ;; '
 
     const answer = await submit($, ' ;; ')
+    await clock.settle()
     const list = await $.ui.mount({ ...PANE, surface })
 
-    expect(answer.drop).toContain('the stash is open')
+    expect(answer.drop).toBe('stash open · esc closes it')
+    expect(box.text).toBe('')
     expect(entered).toHaveLength(0)
-    expect(panes.opened).toEqual([{ id: LIST, focus: true }])
+    // Asked for at Enter, then again once the box is empty, so it takes the keyboard.
+    expect(panes.opened).toEqual([{ id: LIST, focus: true }, { id: LIST, focus: true }])
     expect(saved()).toHaveLength(3)
     expect((await list.find({ key: 'use-0-2' }))?.text).toBe(' newest thought ')
     expect((await list.find({ key: 'use-0-1' }))?.text).toBe(' middle thought ')
@@ -394,6 +434,17 @@ for (const surface of SURFACES) {
       releasedVia: 'fill',
       releasedAt: 600_000,
     })
+  })
+
+  test(`${surface}: a box still holding the bare marker takes the picked thought whole`, async ($, on) => {
+    const { box } = world(on, THREE)
+    await start($)
+    const list = await openList($)
+    box.text = ';;'
+
+    await list.press({ key: 'use-0-2' })
+
+    expect(box.text).toBe('newest thought')
   })
 
   test(`${surface}: a picked thought lands after a draft already in the box`, async ($, on) => {

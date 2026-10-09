@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "A stash for prompts and thoughts inside a Claude Code session: stash one with ;; and bring it back at the turn you choose",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "plugins": [
     {
       "name": "prompt-stash",
       "source": "./",
       "description": "Stash a thought from the prompt box with ;; and bring it back in a later turn",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "productivity",
       "tags": [
         "thoughts",

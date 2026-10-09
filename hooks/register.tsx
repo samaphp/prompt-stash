@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, UiPressArgument } from 'claude-code'
+import type { EngineInterface, PaneOpenArgs, Register, UiPressArgument } from 'claude-code'
 
 import type { DraftKind, Thought } from '../types'
 
@@ -21,6 +21,7 @@ const MARKER = ';;'
 // The list is a pane that holds the keyboard while open, so its rows answer
 // to a bare number and `c`, `d` and `u` stay free for copy, delete and undo.
 const LIST = 'shelf-list'
+const LIST_PANE: PaneOpenArgs = { id: LIST, title: 'Stash', focus: true, closeOnEscape: true }
 const ROW_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
 const ROW_PREFIX = 'use-'
 
@@ -29,6 +30,17 @@ const ASK_MS = 4_000
 
 const TAG = '●'
 const HINT = `${MARKER} + enter opens`
+
+// The engine prints one transcript row for every prompt a hook drops, as
+// "Prompt dropped by a hook: <reason>". These reasons are this mod's own
+// words, and the row is rewritten to just them, so it reads as what
+// happened and never as an error. The match is on the words at the row's
+// end, so a change in the engine's wording before them still finds them.
+const NOTICE = {
+  stashed: `stashed · ${HINT} the stash`,
+  opened: 'stash open · esc closes it',
+  unopened: 'the stash could not open here',
+}
 
 // Decided 2026-10-06, after the shelf emptied when its conversation moved to
 // the agent window: a shelf belongs to a conversation. Claude Code gives a
@@ -179,7 +191,7 @@ const releaseIntoBox = async ($: EngineInterface, id: string) => {
   // A draft already in the box is kept; the thought lands on a new line after it.
   const box = await $.prompt.read()
   const filled =
-    box.text.trim() === ''
+    thoughtIn(box.text) === '' || box.text.trim() === ''
       ? await $.prompt.fill({ text: thought.text, mode: 'replace' })
       : await $.prompt.fill({ text: `\n${thought.text}`, mode: 'append' })
 
@@ -199,6 +211,29 @@ const releaseIntoBox = async ($: EngineInterface, id: string) => {
 
   return true
 }
+
+// From Claude Code 2.1.295 a dropped prompt's text comes back into the box
+// after the hook answered, and a pane asked for while the box holds text is
+// placed without the keyboard. Once Enter has been answered this empties the
+// box and, when a pane is named, asks for it again so it takes the keyboard.
+// A no-op on versions that emptied the box themselves.
+const clearBox = ($: EngineInterface, reopen?: PaneOpenArgs) => {
+  $.clock.after(0, async () => {
+    try {
+      await $.prompt.fill({ text: '', mode: 'replace' })
+
+      if (reopen) {
+        await $.ui.open(reopen)
+      }
+    } catch (error) {
+      $.ui.log(`the box was not emptied: ${reasonOf(error)}`, { to: 'debug' })
+    }
+  })
+}
+
+/** The text of a transcript row's text blocks, joined. */
+const textOf = (content: readonly { type: string; text?: string }[]) =>
+  content.map(block => (block.type === 'text' ? (block.text ?? '') : '')).join('')
 
 // After `c`, `d` or `u` the highlight goes back to the thought it was on, so
 // the arrows continue from there.
@@ -406,7 +441,7 @@ export const register: Register = on => {
     if (thought === '') {
       // Asked for before any await, while Enter is still being answered: the
       // engine then seats the list at any width and hands it the keyboard.
-      const opening = $.ui.open({ id: LIST, title: 'Stash', focus: true, closeOnEscape: true })
+      const opening = $.ui.open(LIST_PANE)
 
       try {
         await setDraft($, 'plain')
@@ -420,27 +455,33 @@ export const register: Register = on => {
         $.ui.log(`the list was not prepared: ${reasonOf(error)}`)
       }
 
-      // The notice is worded once the list's fate is known.
+      // The notice is worded once the list's fate is known. The box is emptied
+      // only then: a timer set earlier fires during this wait, before the
+      // engine puts the dropped text back.
       try {
         const opened = await opening
 
+        clearBox($, opened.isPlaced ? LIST_PANE : undefined)
+
         return {
-          drop: opened.isPlaced ? 'the stash is open · esc closes it' : `the stash could not open here (${opened.reason})`,
+          drop: opened.isPlaced ? NOTICE.opened : `${NOTICE.unopened} (${opened.reason})`,
         }
       } catch (error) {
         $.ui.log(`the list did not open: ${reasonOf(error)}`)
+        clearBox($)
 
-        return { drop: `the stash could not open here (${reasonOf(error)})` }
+        return { drop: `${NOTICE.unopened} (${reasonOf(error)})` }
       }
     }
 
     try {
       await setDraft($, 'plain')
       await shelve($, thought)
+      clearBox($)
 
       // The engine shows this after its own "Prompt dropped by a hook:". The
       // thought's text stays out of it, so the notice says nothing of what was shelved.
-      return { drop: `stashed for later · ${HINT} the stash` }
+      return { drop: NOTICE.stashed }
     } catch (error) {
       // Decided 2026-10-06: when the shelf fails, the prompt reaches Claude as
       // it would without the mod, and the person is told why.
@@ -477,6 +518,19 @@ export const register: Register = on => {
     }
 
     return moved
+  })
+
+  on('session.append', { door: 'notice' }, async ($, e, next) => {
+    const text = textOf(e.message.content)
+    const start = [NOTICE.stashed, NOTICE.opened, NOTICE.unopened]
+      .map(words => text.indexOf(words))
+      .find(at => at > 0)
+
+    if (start !== undefined) {
+      return next({ ...e, message: { ...e.message, content: [{ type: 'text', text: text.slice(start) }] } })
+    }
+
+    return next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: LIST }, async ($, e) => {
